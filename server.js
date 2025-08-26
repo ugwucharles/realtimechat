@@ -430,14 +430,21 @@ async function notifyInternalNewMessage({ platform, chatId, name, text, conversa
   }
 }
 
-// Default to local dev values if env vars are not set
-const pool = new Pool({
-  host: process.env.PGHOST || 'localhost',
-  port: parseInt(process.env.PGPORT || '5432', 10),
-  user: process.env.PGUSER || 'chatapp',
-  password: process.env.PGPASSWORD || 'chatpass',
-  database: process.env.PGDATABASE || 'chatapp',
-});
+// Postgres connection: supports DATABASE_URL or individual vars. Use PGSSLMODE=require to enable TLS.
+const DB_URL = process.env.DATABASE_URL || '';
+const PGSSLMODE = (process.env.PGSSLMODE || 'disable').toLowerCase();
+const ssl = PGSSLMODE === 'require' ? { rejectUnauthorized: false } : undefined;
+
+const pool = DB_URL
+  ? new Pool({ connectionString: DB_URL, ssl })
+  : new Pool({
+      host: process.env.PGHOST || 'localhost',
+      port: parseInt(process.env.PGPORT || '5432', 10),
+      user: process.env.PGUSER || 'chatapp',
+      password: process.env.PGPASSWORD || 'chatpass',
+      database: process.env.PGDATABASE || 'chatapp',
+      ...(ssl ? { ssl } : {})
+    });
 
 async function waitForDB(retries = 30, delayMs = 1000) {
   for (let i = 0; i < retries; i++) {
