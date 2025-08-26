@@ -968,6 +968,45 @@ app.get('/debug/sendpulse/ig/messages', async (req, res) => {
   }
 });
 
+// Debug: direct Instagram send via SendPulse (bypasses chatbot relay). Secured by X-Debug-Key.
+app.post('/debug/ig/send', express.json(), async (req, res) => {
+  try {
+    const key = (req.get('X-Debug-Key') || req.query.key || '').toString();
+    const allowKey = process.env.INTEGRATION_INGEST_KEY || process.env.SENDPULSE_WEBHOOK_KEY || '';
+    if (!allowKey || key !== allowKey) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const text = (req.body?.text || '').toString().trim();
+    let chatId = (req.body?.chat_id || req.body?.chatId || '').toString().trim();
+    const convIdRaw = req.body?.conversationId;
+    const conversationId = convIdRaw != null ? Number(convIdRaw) : NaN;
+    let usedConversation = null;
+
+    if ((!chatId || !chatId.length) && !Number.isNaN(conversationId)) {
+      const q = await pool.query(
+        `SELECT conv.id, conv.customer_external_id, conv.customer_contact_id, ch.name AS channel_name
+         FROM conversations conv LEFT JOIN channels ch ON ch.id = conv.channel_id
+         WHERE conv.id = $1`,
+        [conversationId]
+      );
+      if (!q.rowCount) return res.status(404).json({ error: 'conversation not found' });
+      const r = q.rows[0];
+      if (r.channel_name !== 'instagram') return res.status(400).json({ error: 'conversation is not instagram' });
+      chatId = String(r.customer_external_id || '').trim();
+      usedConversation = { id: r.id, contact_id: r.customer_contact_id || null };
+    }
+
+    if (!chatId || !text) return res.status(400).json({ error: 'Missing chat_id or text' });
+
+    const ok = await sendPulseSendInstagram(chatId, text);
+    return res.json({ ok, chat_id: chatId, conversation: usedConversation || null });
+  } catch (e) {
+    console.error('debug ig send error', e);
+    return res.status(500).json({ error: 'internal error', details: e.message });
+  }
+});
+
 // Admin: backfill missing IG contact_id for open conversations
 app.post('/admin/backfill/ig-contacts', async (req, res) => {
   try {
