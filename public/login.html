@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Login · Realtime Chat</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="center">
+  <div class="card w-640 auth-underline">
+    <h2 style="margin-top:0">Log in</h2>
+    <p class="muted">Access your agent inbox.</p>
+    <div class="row gap" style="flex-wrap:wrap; margin-top:8px">
+      <input id="email" class="input" placeholder="Email" type="email" style="min-width:260px" />
+      <input id="password" class="input" placeholder="Password" type="password" />
+      <button id="loginBtn" class="button">Login</button>
+    </div>
+    <div id="error" class="muted" style="color:#fca5a5; margin-top:10px"></div>
+    <p class="muted" style="margin-top:16px">No account? <a href="/register">Register</a></p>
+  </div>
+
+  <script>
+    const $ = (s)=>document.querySelector(s);
+    document.getElementById('loginBtn').addEventListener('click', async () => {
+      const email = $('#email').value.trim();
+      const password = $('#password').value;
+      $('#error').textContent = '';
+      try {
+        const r = await fetch('/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email, password }) });
+        if (!r.ok) {
+          const t = await r.json().catch(()=>({error:'Login failed'}));
+          $('#error').textContent = t.error || 'Login failed';
+          return;
+        }
+        window.location.href = '/agent';
+      } catch (e) {
+        $('#error').textContent = e.message;
+      }
+    });
+  </script>
+</body>
+</html>

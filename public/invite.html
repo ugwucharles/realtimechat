@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Accept invite · Realtime Chat</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="center">
+  <div class="card w-640 auth-underline">
+    <h2 style="margin-top:0">Accept invitation</h2>
+    <p class="muted" id="info">Loading invite...</p>
+
+    <div id="form" class="row gap" style="flex-wrap:wrap; margin-top:8px; display:none">
+      <input id="name" class="input" placeholder="Your full name" style="min-width:220px" />
+      <input id="password" class="input" placeholder="Create password (min 8 chars)" type="password" />
+      <button id="acceptBtn" class="button">Join</button>
+    </div>
+
+    <div id="error" class="muted" style="color:#fca5a5; margin-top:10px"></div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    const $ = (s)=>document.querySelector(s);
+    const info = $('#info');
+
+    async function loadInvite(){
+      try {
+        const r = await fetch(`/invites/${encodeURIComponent(token)}`);
+        const data = await r.json();
+        if (!r.ok){ info.textContent = data.error || 'Invalid invite'; return; }
+        if (data.expired || data.status !== 'pending'){ info.textContent = 'This invite is no longer valid.'; return; }
+        info.textContent = `You were invited to join ${data.orgName} as ${data.role}.`;
+        document.getElementById('form').style.display='flex';
+      } catch (e) { info.textContent = e.message; }
+    }
+
+    document.getElementById('acceptBtn').addEventListener('click', async () => {
+      const name = $('#name').value.trim();
+      const password = $('#password').value;
+      $('#error').textContent = '';
+      try {
+        const r = await fetch(`/invites/${encodeURIComponent(token)}/accept`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, password }) });
+        const data = await r.json().catch(()=>({}));
+        if (!r.ok){ $('#error').textContent = data.error || 'Failed to accept'; return; }
+        window.location.href = '/dashboard';
+      } catch (e) { $('#error').textContent = e.message; }
+    });
+
+    if (!token){ info.textContent = 'Missing token'; } else { loadInvite(); }
+  </script>
+</body>
+</html>
+

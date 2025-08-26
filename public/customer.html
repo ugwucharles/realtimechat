@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Customer Chat · Realtime Chat</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="header">
+    <div class="row"><div class="title">Support Chat</div><span class="badge" id="agentBadge">No agent yet</span></div>
+    <div class="row">
+      <input id="custName" class="input" placeholder="Your name" value="Customer" style="width:220px" />
+      <button id="startBtn" class="button">Start chat</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="chat">
+      <div id="messages" class="messages"></div>
+    </div>
+    <form id="composer" class="composer" autocomplete="off">
+      <input id="msgInput" class="input" placeholder="Type your message" disabled />
+      <button class="button" type="submit" disabled>Send</button>
+    </form>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/customer.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Settings · Realtime Chat</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="header">
+    <div class="row">
+      <div class="title">Organization Settings</div>
+      <span class="badge" id="orgBadge"></span>
+    </div>
+    <div class="row">
+      <a class="button ghost" href="/dashboard">Back to Inbox</a>
+    </div>
+  </div>
+
+  <div class="app" style="gap:24px; align-items:flex-start">
+    <div class="card" style="flex: 0 0 520px">
+      <h3 style="margin-top:0">Invite agents</h3>
+      <div class="row gap" style="flex-wrap:wrap; margin-top:8px">
+        <input id="email" class="input" type="email" placeholder="Agent email" style="min-width:260px" />
+        <select id="role" class="input" style="max-width:180px">
+          <option value="agent">Agent</option>
+          <option value="owner">Owner</option>
+        </select>
+        <button id="inviteBtn" class="button">Send invite</button>
+      </div>
+      <div id="inviteError" class="muted" style="color:#fca5a5; margin-top:10px"></div>
+    </div>
+
+    <div class="card" style="flex:1 1 auto">
+      <h3 style="margin-top:0">Pending invites</h3>
+      <table style="width:100%; border-collapse:collapse">
+        <thead>
+          <tr style="text-align:left; border-bottom:1px solid #e5e7eb">
+            <th>Email</th>
+            <th>Role</th>
+            <th>Status</th>
+            <th>Accept link</th>
+          </tr>
+        </thead>
+        <tbody id="invitesBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const $ = (s)=>document.querySelector(s);
+
+    async function loadMe(){
+      const r = await fetch('/me');
+      if (!r.ok) { window.location.href = '/login'; return; }
+      const me = await r.json();
+      $('#orgBadge').textContent = me.org ? me.org.name : 'No org';
+      if (me.role !== 'owner') { window.location.href = '/dashboard'; return; }
+    }
+
+    async function loadInvites(){
+      const body = $('#invitesBody');
+      body.innerHTML = '';
+      try {
+        const r = await fetch('/invites');
+        const list = await r.json();
+        for (const inv of list){
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td style="padding:8px 4px">${inv.email}</td>
+            <td style="padding:8px 4px">${inv.role}</td>
+            <td style="padding:8px 4px">${inv.status}</td>
+            <td style="padding:8px 4px"><input class="input" style="width:100%" value="${inv.acceptUrl}" readonly onclick="this.select()" /></td>`;
+          body.appendChild(tr);
+        }
+      } catch (e) { console.error('invites', e); }
+    }
+
+    document.getElementById('inviteBtn').addEventListener('click', async () => {
+      const email = $('#email').value.trim().toLowerCase();
+      const role = $('#role').value;
+      $('#inviteError').textContent = '';
+      try {
+        const r = await fetch('/invites', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email, role }) });
+        const data = await r.json().catch(()=>({}));
+        if (!r.ok){ $('#inviteError').textContent = data.error || 'Failed to create invite'; return; }
+        $('#email').value='';
+        await loadInvites();
+      } catch (e) { $('#inviteError').textContent = e.message; }
+    });
+
+    loadMe().then(loadInvites);
+  </script>
+</body>
+</html>
+

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Inbox · Realtime Chat</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="header">
+    <div class="row">
+      <div class="title">Dashboard</div>
+      <span class="status-dot offline" id="agentStatusDot" title="Offline"></span>
+    </div>
+    <div class="row">
+      <input id="agentName" class="input" placeholder="Agent name" value="Agent" style="width:200px" />
+    </div>
+  </div>
+
+  <div class="dashboard">
+    <nav class="nav">
+      <div class="nav-logo">Cuscom</div>
+      <a class="nav-item active" href="/dashboard">Inbox</a>
+      <a class="nav-item" href="/notifications">Notifications <span class="nav-badge" id="notifBadge" hidden>0</span></a>
+      <a class="nav-item" href="/settings">Settings</a>
+      <div class="nav-actions">
+        <button id="goOnline" class="button small" type="button">Go online</button>
+        <button id="logoutBtn" class="button ghost small" type="button">Logout</button>
+      </div>
+    </nav>
+    <div class="content">
+      <div class="analytics">
+        <div class="tile">
+          <div class="label">Open</div>
+          <div class="value" id="aOpen">0</div>
+        </div>
+        <div class="tile">
+          <div class="label">Unassigned</div>
+          <div class="value" id="aUnassigned">0</div>
+        </div>
+        <div class="tile">
+          <div class="label">Online</div>
+          <div class="value" id="aOnline">0</div>
+        </div>
+        <div class="tile">
+          <div class="label">Messages (24h)</div>
+          <div class="value" id="aMsgs">0</div>
+        </div>
+      </div>
+      <div class="app">
+    <aside class="sidebar">
+      <div class="section-title">Conversations</div>
+      <input id="search" class="search" placeholder="Search by name" />
+      <div class="row" style="margin:12px 0 6px 0; flex-wrap: wrap; gap:8px">
+        <button id="fAll" class="button ghost small" type="button">All</button>
+        <button id="fMine" class="button ghost small" type="button">Mine</button>
+        <button id="fUnassigned" class="button ghost small" type="button">Unassigned</button>
+        <select id="statusSelect" class="input" style="max-width:150px">
+          <option value="open">Open</option>
+          <option value="pending">Pending</option>
+          <option value="closed">Closed</option>
+          <option value="all">All status</option>
+        </select>
+      </div>
+      <ul id="convList" class="list"></ul>
+    </aside>
+
+    <main class="main">
+      <div class="header">
+        <div class="row gap">
+          <div class="title" id="chatTitle">No conversation selected</div>
+          <span class="badge" id="chatChannel"></span>
+        </div>
+        <div class="row">
+          <button id="claimBtn" class="button ghost" disabled>Claim</button>
+          <button id="closeBtn" class="button danger" disabled>Close</button>
+        </div>
+      </div>
+
+      <div class="chat">
+        <div id="messages" class="messages"></div>
+      </div>
+
+      <form id="composer" class="composer" autocomplete="off">
+        <textarea id="msgInput" class="input" placeholder="Type your reply (Shift+Enter for newline)"></textarea>
+        <button class="button" type="submit">Send</button>
+      </form>
+    </main>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/agent.js"></script>
+</body>
+</html>
+
