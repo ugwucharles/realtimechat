@@ -749,6 +749,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Avoid 404 noise for browsers requesting /favicon.ico
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
+// Health check endpoint for Render (always 200 OK)
+app.get('/healthz', (req, res) => res.status(200).send('ok'));
+
 // Serve the chat UI at /chat as well (alias to index.html)
 app.get('/chat', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -2230,7 +2233,7 @@ await twilioClient.messages.create({
   try {
     await waitForDB(30, 1000);
     await initDb();
-    server.listen(PORT, () => {
+    server.listen(PORT, '0.0.0.0', () => {
       console.log(`Server listening on http://localhost:${PORT}`);
     });
   } catch (err) {
