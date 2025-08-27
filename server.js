@@ -1015,6 +1015,46 @@ app.get('/invite', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'invite.html'));
 });
 
+// Meta: deauthorize callback (called when a user removes the app)
+// Meta sends a POST form with signed_request which we verify with app secret.
+app.post('/auth/meta/deauthorize', express.urlencoded({ extended: false }), (req, res) => {
+  try {
+    const sr = (req.body?.signed_request || '').toString();
+    if (!sr || !META_APP_SECRET) return res.sendStatus(200);
+    const [sigB64, payloadB64] = sr.split('.', 2);
+    if (!sigB64 || !payloadB64) return res.sendStatus(200);
+    const base64urlToBuf = (s) => Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    const expected = crypto.createHmac('sha256', META_APP_SECRET).update(payloadB64).digest();
+    const provided = base64urlToBuf(sigB64);
+    if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
+      let payload = {}; try { payload = JSON.parse(base64urlToBuf(payloadB64).toString('utf8')); } catch {}
+      console.log('Meta deauthorize payload', payload);
+    }
+  } catch (e) {
+    console.warn('Meta deauthorize error', e.message);
+  }
+  return res.sendStatus(200);
+});
+
+// Meta: data deletion request endpoint
+// Respond with a confirmation_code and a status URL as per Meta policy
+app.post('/auth/meta/data-deletion', express.urlencoded({ extended: false }), (req, res) => {
+  try {
+    const code = crypto.randomBytes(8).toString('hex');
+    const base = process.env.PUBLIC_BASE_URL || `${req.get('x-forwarded-proto') || req.protocol}://${req.get('x-forwarded-host') || req.get('host')}`;
+    const url = `${base}/auth/meta/data-deletion-status?code=${encodeURIComponent(code)}`;
+    return res.json({ url, confirmation_code: code });
+  } catch (e) {
+    return res.json({ status: 'received' });
+  }
+});
+
+// Simple data deletion status endpoint
+app.get('/auth/meta/data-deletion-status', (req, res) => {
+  const code = (req.query.code || '').toString();
+  return res.json({ code, status: 'pending' });
+});
+
 // Analytics summary
 app.get('/analytics/summary', async (req, res) => {
   try {
