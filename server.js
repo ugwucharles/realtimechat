@@ -975,23 +975,38 @@ app.get('/auth/meta/callback', async (req, res) => {
       if (llResp.ok && llJson.access_token) userToken = llJson.access_token;
     } catch {}
 
-    // 3) Find a Page that has an Instagram business account and its Page token
-    const pagesUrl = `https://graph.facebook.com/${META_GRAPH_VERSION}/me/accounts?fields=name,access_token,instagram_business_account{id,username}&access_token=${encodeURIComponent(userToken)}`;
+    // 3) Find a Page that has an Instagram Professional account and its Page token
+    // Some setups expose connected_instagram_account instead of instagram_business_account.
+    const pagesUrl = `https://graph.facebook.com/${META_GRAPH_VERSION}/me/accounts?fields=name,access_token,instagram_business_account{id,username},connected_instagram_account{id,username},tasks&access_token=${encodeURIComponent(userToken)}`;
     const pagesResp = await fetch(pagesUrl);
     const pages = await pagesResp.json();
     if (!pagesResp.ok) {
       return res.status(500).send('List pages failed: ' + JSON.stringify(pages));
     }
-    const page = Array.isArray(pages.data) ? pages.data.find(p => p.instagram_business_account && p.access_token) : null;
+    const page = Array.isArray(pages.data)
+      ? pages.data.find(p => (p.instagram_business_account || p.connected_instagram_account) && p.access_token)
+      : null;
 
     if (!page) {
+      const list = Array.isArray(pages.data) ? pages.data.map(p => ({
+        name: p.name,
+        has_ig_business: !!p.instagram_business_account,
+        has_connected_ig: !!p.connected_instagram_account,
+        tasks: p.tasks || []
+      })) : [];
       return res.status(200).type('html').send(`<!doctype html><html><body>
 <h2>Login successful</h2>
-<p>No Facebook Page with a linked Instagram Business account was found for this user. Ensure your Instagram account is a Business/Creator account and is connected to a Facebook Page, then retry.</p>
+<p>No Facebook Page with a linked Instagram Professional account was found for this user.</p>
+<ol>
+<li>On Instagram, switch to Professional and link your Facebook Page in Accounts Center.</li>
+<li>In the Facebook login dialog, click <b>Edit settings</b> and select the Page you want to connect.</li>
+</ol>
+<p>Debug summary of your Pages (sanitized):</p>
+<pre>${(() => { try { return JSON.stringify(list, null, 2); } catch (_) { return ''; } })()}</pre>
 </body></html>`);
     }
 
-    const ig = page.instagram_business_account || {};
+    const ig = page.instagram_business_account || page.connected_instagram_account || {};
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Instagram login complete</title>
 <style>body{font-family:system-ui,Segoe UI,Arial;margin:2rem;max-width:900px}code{background:#f2f2f2;padding:.2rem .35rem;border-radius:4px;word-break:break-all}pre{white-space:pre-wrap;word-break:break-all;background:#f8f8f8;padding:12px;border-radius:6px}</style>
 </head><body>
