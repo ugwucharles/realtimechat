@@ -41,10 +41,11 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 
 // ---- Meta (Messenger & Instagram) ----
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || '';
+const META_APP_ID = process.env.META_APP_ID || '';
 const META_APP_SECRET = process.env.META_APP_SECRET || '';
 const FB_PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN || '';
 const IG_PAGE_ACCESS_TOKEN = process.env.IG_PAGE_ACCESS_TOKEN || '';
-const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v19.0';
+const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v23.0';
 const META_WEBHOOK_STRICT = (process.env.META_WEBHOOK_STRICT || 'false') === 'true';
 
 // ---- SendPulse (Facebook/Instagram via Chatbots) ----
@@ -904,6 +905,109 @@ app.get('/settings', (req, res) => {
   if (!req.session || !req.session.user) return res.redirect('/login');
   if (req.session.user.role !== 'owner') return res.redirect('/dashboard');
   res.sendFile(path.join(__dirname, 'public', 'settings.html'));
+});
+
+// Meta OAuth: start login
+app.get('/auth/meta/login', (req, res) => {
+  try {
+    const APP_ID = process.env.META_APP_ID || META_APP_ID;
+    const APP_SECRET = process.env.META_APP_SECRET || META_APP_SECRET;
+    if (!APP_ID || !APP_SECRET) {
+      return res.status(500).send('Missing META_APP_ID or META_APP_SECRET');
+    }
+    const redirectUri = `${baseUrlFromReq(req)}/auth/meta/callback`;
+    const scopes = [
+      'pages_show_list',
+      'pages_read_engagement',
+      'pages_manage_metadata',
+      'pages_messaging',
+      'instagram_basic',
+      'instagram_manage_messages'
+    ].join(',');
+    const state = crypto.randomBytes(8).toString('hex');
+    const authUrl = `https://www.facebook.com/${META_GRAPH_VERSION}/dialog/oauth?client_id=${encodeURIComponent(APP_ID)}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scopes)}&state=${encodeURIComponent(state)}`;
+    return res.redirect(authUrl);
+  } catch (e) {
+    console.error('meta login error', e);
+    return res.status(500).send('Failed to start Meta login');
+  }
+});
+
+// Meta OAuth: callback to exchange code and fetch Page + IG info
+app.get('/auth/meta/callback', async (req, res) => {
+  try {
+    const APP_ID = process.env.META_APP_ID || META_APP_ID;
+    const APP_SECRET = process.env.META_APP_SECRET || META_APP_SECRET;
+    if (!APP_ID || !APP_SECRET) return res.status(500).send('Missing META_APP_ID or META_APP_SECRET');
+
+    const code = (req.query.code || '').toString();
+    if (!code) return res.status(400).send('Missing code');
+
+    const redirectUri = `${baseUrlFromReq(req)}/auth/meta/callback`;
+
+    // 1) Exchange code -> short-lived user token
+    const tokUrl = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/oauth/access_token`);
+    tokUrl.search = new URLSearchParams({
+      client_id: APP_ID,
+      client_secret: APP_SECRET,
+      redirect_uri: redirectUri,
+      code
+    }).toString();
+    const tokResp = await fetch(tokUrl, { method: 'GET' });
+    const tokJson = await tokResp.json();
+    if (!tokResp.ok || !tokJson.access_token) {
+      return res.status(500).send('Token exchange failed: ' + JSON.stringify(tokJson));
+    }
+    const shortUserToken = tokJson.access_token;
+
+    // 2) Optionally exchange to long-lived user token
+    let userToken = shortUserToken;
+    try {
+      const llUrl = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/oauth/access_token`);
+      llUrl.search = new URLSearchParams({
+        grant_type: 'fb_exchange_token',
+        client_id: APP_ID,
+        client_secret: APP_SECRET,
+        fb_exchange_token: shortUserToken
+      }).toString();
+      const llResp = await fetch(llUrl);
+      const llJson = await llResp.json().catch(() => ({}));
+      if (llResp.ok && llJson.access_token) userToken = llJson.access_token;
+    } catch {}
+
+    // 3) Find a Page that has an Instagram business account and its Page token
+    const pagesUrl = `https://graph.facebook.com/${META_GRAPH_VERSION}/me/accounts?fields=name,access_token,instagram_business_account{id,username}&access_token=${encodeURIComponent(userToken)}`;
+    const pagesResp = await fetch(pagesUrl);
+    const pages = await pagesResp.json();
+    if (!pagesResp.ok) {
+      return res.status(500).send('List pages failed: ' + JSON.stringify(pages));
+    }
+    const page = Array.isArray(pages.data) ? pages.data.find(p => p.instagram_business_account && p.access_token) : null;
+
+    if (!page) {
+      return res.status(200).type('html').send(`<!doctype html><html><body>
+<h2>Login successful</h2>
+<p>No Facebook Page with a linked Instagram Business account was found for this user. Ensure your Instagram account is a Business/Creator account and is connected to a Facebook Page, then retry.</p>
+</body></html>`);
+    }
+
+    const ig = page.instagram_business_account || {};
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Instagram login complete</title>
+<style>body{font-family:system-ui,Segoe UI,Arial;margin:2rem;max-width:900px}code{background:#f2f2f2;padding:.2rem .35rem;border-radius:4px;word-break:break-all}pre{white-space:pre-wrap;word-break:break-all;background:#f8f8f8;padding:12px;border-radius:6px}</style>
+</head><body>
+<h2>Instagram business login successful</h2>
+<p>Page: <b>${page.name || ''}</b></p>
+<p>Instagram account ID: <code>${ig.id || ''}</code> ${ig.username ? `(username: ${ig.username})` : ''}</p>
+<p>Copy this Page access token and set it as <code>IG_PAGE_ACCESS_TOKEN</code> in your Render environment, then redeploy:</p>
+<pre>${page.access_token}</pre>
+<p>After deploying you can use webhooks to ingest DMs and enable reply sending from your dashboard.</p>
+</body></html>`;
+
+    return res.status(200).type('html').send(html);
+  } catch (e) {
+    console.error('Meta OAuth callback error', e);
+    return res.status(500).send('OAuth error: ' + e.message);
+  }
 });
 
 // Public invite acceptance page
