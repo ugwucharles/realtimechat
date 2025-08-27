@@ -181,66 +181,154 @@ async function resolveIgContactId(chatId) {
   return null;
 }
 
-// SendPulse Instagram sender: tries configured base first, then falls back across regions
+// SendPulse Instagram sender: Enhanced version with platform-specific handling
 async function sendPulseSendInstagram(chatId, text) {
   try {
     if (!chatId || !text) return false;
-    // Resolve correct contact_id first
-    let resolved = null;
-    try { resolved = await resolveIgContactId(chatId); } catch {}
 
-    const sanitize = (b) => (b || '').trim().replace(/\/+$/, '');
-    const envBase = sanitize(process.env.SENDPULSE_API_BASE || 'https://api.sendpulse.com');
+    const base = 'https://api.sendpulse.com';
+    const botId = process.env.SENDPULSE_BOT_ID_INSTAGRAM;
+    
+    // Enhanced payload with bot_id for better platform compatibility
     const payload = {
       chat_id: String(chatId),
-      contact_id: String(resolved?.contact_id || chatId),
+      contact_id: String(chatId),
+      bot_id: String(botId), // Include bot_id for better delivery
       text: String(text)
     };
+
     const debugSend = (process.env.DEBUG_SP_SEND || 'true') === 'true';
+    if (debugSend) console.log('SP IG send attempt:', { 
+      chat_id: payload.chat_id, 
+      bot_id: payload.bot_id,
+      text: payload.text.substring(0, 100) 
+    });
 
-    // Try the base that resolved contact first (if any), then cached token base, env base, EU, Global
-    const baseCandidatesRaw = [envBase, resolved?.base || null, sendpulseToken.base || null, 'https://api.eu.sendpulse.com', 'https://api.sendpulse.com'];
-    const baseCandidates = Array.from(new Set(baseCandidatesRaw.filter(Boolean)));
+    try {
+      const token = await getSendpulseToken(false, base);
+      const url = `${base}/instagram/chats/messages`;
 
-    for (const base of baseCandidates) {
-      try {
-        const sendOnce = async (forceNewToken = false) => {
-          const token = await getSendpulseToken(forceNewToken, base);
-          const url = `${base}/instagram/chats/messages`;
-          const resp = await fetch(url, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          return { resp, url };
-        };
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 
+          Authorization: `Bearer ${token}`, 
+          'Content-Type': 'application/json',
+          'User-Agent': 'SendPulse-Instagram-Bot/1.0' // Add user agent for better compatibility
+        },
+        body: JSON.stringify(payload),
+      });
 
-        let { resp, url } = await sendOnce(false);
-        if (resp.status === 401 || resp.status === 403) {
-          ({ resp, url } = await sendOnce(true));
-        }
+      const textBody = await resp.text().catch(() => '');
+      let json;
+      try { json = textBody ? JSON.parse(textBody) : null; } catch {}
 
-        const textBody = await resp.text().catch(() => '');
-        let json;
-        try { json = textBody ? JSON.parse(textBody) : null; } catch {}
-
-        if (!resp.ok) {
-          console.error('SendPulse IG send failed', resp.status, url, JSON.stringify(payload), textBody.slice(0, 1000));
-          continue;
-        }
-        if (json && typeof json.success === 'boolean' && json.success === false) {
-          console.error('SendPulse IG send API error (success=false)', url, JSON.stringify(payload), textBody.slice(0, 1000));
-          continue;
-        }
-        if (debugSend) console.log('SP IG send OK', url, { chat_id: payload.chat_id, usedBase: base, resolved_contact: resolved?.contact_id || null }, json || textBody.slice(0, 200));
-        return true;
-      } catch (e) {
-        console.error('SendPulse IG send error', base, e.message);
+      if (!resp.ok) {
+        console.error('SendPulse IG send failed', resp.status, url, JSON.stringify(payload), textBody.slice(0, 1000));
+        return false;
       }
+
+      if (json && typeof json.success === 'boolean' && json.success === false) {
+        console.error('SendPulse IG send API error (success=false)', url, JSON.stringify(payload), textBody.slice(0, 1000));
+        return false;
+      }
+
+      // Enhanced success logging with message ID
+      const messageId = json?.data?.[0]?.id;
+      if (debugSend) {
+        console.log('SP IG send OK', url, { 
+          chat_id: payload.chat_id, 
+          bot_id: payload.bot_id,
+          message_id: messageId,
+          success: true 
+        });
+      }
+
+      // Log warning about potential delivery issues
+      if (messageId) {
+        console.warn('⚠️  Instagram message sent to SendPulse successfully, but delivery to Instagram may be blocked by platform policies');
+        console.warn('💡 Check Instagram app and verify business account permissions');
+      }
+
+      return true;
+
+    } catch (e) {
+      console.error('SendPulse IG send error', e.message);
+      return false;
     }
-    return false;
   } catch (e) {
     console.error('SendPulse IG send error', e.message);
+    
+    // Try fallback method if primary fails
+    console.log('🔄 Trying fallback Instagram messaging method...');
+    return await sendPulseSendInstagramFallback(chatId, text);
+  }
+}
+
+// Fallback Instagram messaging method using Chatbots API
+async function sendPulseSendInstagramFallback(chatId, text) {
+  try {
+    if (!chatId || !text) return false;
+
+    const base = 'https://api.sendpulse.com';
+    const botId = process.env.SENDPULSE_BOT_ID_INSTAGRAM;
+    
+    // Try Chatbots API as fallback
+    const payload = {
+      bot_id: String(botId),
+      contact_id: String(chatId),
+      text: String(text)
+    };
+
+    const debugSend = (process.env.DEBUG_SP_SEND || 'true') === 'true';
+    if (debugSend) console.log('SP IG fallback attempt:', { 
+      bot_id: payload.bot_id,
+      contact_id: payload.contact_id,
+      text: payload.text.substring(0, 100) 
+    });
+
+    try {
+      const token = await getSendpulseToken(false, base);
+      const url = `${base}/chatbots/messages/send`;
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 
+          Authorization: `Bearer ${token}`, 
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const textBody = await resp.text().catch(() => '');
+      let json;
+      try { json = textBody ? JSON.parse(textBody) : null; } catch {}
+
+      if (!resp.ok) {
+        console.error('SendPulse IG fallback failed', resp.status, url, JSON.stringify(payload), textBody.slice(0, 1000));
+        return false;
+      }
+
+      if (json && typeof json.success === 'boolean' && json.success === false) {
+        console.error('SendPulse IG fallback API error (success=false)', url, JSON.stringify(payload), textBody.slice(0, 1000));
+        return false;
+      }
+
+      if (debugSend) {
+        console.log('SP IG fallback OK', url, { 
+          bot_id: payload.bot_id,
+          contact_id: payload.contact_id,
+          success: true 
+        });
+      }
+
+      return true;
+
+    } catch (e) {
+      console.error('SendPulse IG fallback error', e.message);
+      return false;
+    }
+  } catch (e) {
+    console.error('SendPulse IG fallback error', e.message);
     return false;
   }
 }
@@ -721,11 +809,45 @@ const io = new Server(server);
 
 // Meta Webhooks (Messenger & Instagram)
 app.get('/webhooks/meta', (req, res) => {
-  return res.sendStatus(410); // Meta webhook disabled
+  try {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+    if (mode === 'subscribe' && token && token === META_VERIFY_TOKEN) {
+      return res.status(200).send(challenge);
+    }
+    return res.sendStatus(403);
+  } catch (e) {
+    return res.sendStatus(500);
+  }
 });
 
 app.post('/webhooks/meta', express.raw({ type: 'application/json' }), async (req, res) => {
-  return res.sendStatus(410); // Meta webhook disabled
+  try {
+    // Verify signature (optional strict mode)
+    const signature =
+      req.get('X-Hub-Signature-256') ||
+      req.get('X-Hub-Signature') ||
+      req.headers['x-hub-signature-256'] ||
+      req.headers['x-hub-signature'] ||
+      '';
+    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+    const sigOk = verifyMetaSignature(signature, raw);
+    if (META_WEBHOOK_STRICT && !sigOk) {
+      return res.sendStatus(401);
+    }
+
+    // Parse payload for logging/diagnostics
+    let payload = null;
+    try { payload = JSON.parse(raw.toString('utf8') || '{}'); } catch {}
+    try { console.log('Meta webhook event:', JSON.stringify(payload).slice(0, 1500)); } catch {}
+
+    // Respond quickly per Meta requirements
+    return res.status(200).send('EVENT_RECEIVED');
+  } catch (e) {
+    console.error('Meta webhook error', e);
+    return res.sendStatus(200);
+  }
 });
 
 // Sessions (stored in Postgres)

@@ -322,3 +322,113 @@ body.center {
 .chip.pending { background: #fff8e6; color: #8a6d1a; border-color: #f2e2b8; }
 .chip.closed { background: #f1f1f4; color: #6e6e73; border-color: #d2d2d7; }
 
+/* Privacy Policy Page Styles */
+.privacy-content {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+
+.privacy-content h1 {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 var(--space-4) 0;
+  padding: var(--space-6) var(--space-6) 0 var(--space-6);
+}
+
+.privacy-content .muted {
+  margin: 0 0 var(--space-6) 0;
+  padding: 0 var(--space-6);
+  font-size: 14px;
+}
+
+.privacy-section {
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--border-2);
+}
+
+.privacy-section:last-of-type {
+  border-bottom: none;
+}
+
+.privacy-section h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0 0 var(--space-3) 0;
+}
+
+.privacy-section p {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  margin: 0 0 var(--space-3) 0;
+}
+
+.privacy-section ul {
+  margin: var(--space-3) 0;
+  padding-left: var(--space-5);
+}
+
+.privacy-section li {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  margin-bottom: var(--space-2);
+}
+
+.privacy-section strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.contact-info {
+  background: var(--panel-2);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  margin: var(--space-4) 0;
+}
+
+.contact-info p {
+  margin: var(--space-2) 0;
+}
+
+.privacy-footer {
+  padding: var(--space-6);
+  text-align: center;
+  background: var(--panel-2);
+  border-top: 1px solid var(--border-2);
+}
+
+.privacy-footer p {
+  margin: 0 0 var(--space-4) 0;
+  font-size: 14px;
+}
+
+.privacy-footer .button {
+  display: inline-block;
+  text-decoration: none;
+}
+
+/* Responsive adjustments for privacy page */
+@media (max-width: 768px) {
+  .privacy-content h1 {
+    font-size: 24px;
+    padding: var(--space-5) var(--space-4) 0 var(--space-4);
+  }
+  
+  .privacy-content .muted {
+    padding: 0 var(--space-4);
+  }
+  
+  .privacy-section {
+    padding: var(--space-4);
+  }
+  
+  .privacy-footer {
+    padding: var(--space-5) var(--space-4);
+  }
+}
+
