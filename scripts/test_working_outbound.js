@@ -11,8 +11,8 @@ try { require('dotenv').config({ path: path.join(__dirname, '..', '.env'), overr
 try { require('dotenv').config({ path: path.join(__dirname, '..', '.env.local'), override: true }); } catch {}
 
 async function getToken() {
-  const clientId = process.env.SENDPULSE_CLIENT_ID;
-  const clientSecret = process.env.SENDPULSE_CLIENT_SECRET;
+  const clientId = process.env.SENDPULSE_API_USER_ID;
+  const clientSecret = process.env.SENDPULSE_API_SECRET;
   
   const form = new URLSearchParams();
   form.set('grant_type', 'client_credentials');

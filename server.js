@@ -48,13 +48,6 @@ const IG_PAGE_ACCESS_TOKEN = process.env.IG_PAGE_ACCESS_TOKEN || '';
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v23.0';
 const META_WEBHOOK_STRICT = (process.env.META_WEBHOOK_STRICT || 'false') === 'true';
 
-// ---- SendPulse (Facebook/Instagram via Chatbots) ----
-const SENDPULSE_CLIENT_ID = process.env.SENDPULSE_CLIENT_ID || '';
-const SENDPULSE_CLIENT_SECRET = process.env.SENDPULSE_CLIENT_SECRET || '';
-const SENDPULSE_BOT_ID_FACEBOOK = process.env.SENDPULSE_BOT_ID_FACEBOOK || '';
-const SENDPULSE_BOT_ID_INSTAGRAM = process.env.SENDPULSE_BOT_ID_INSTAGRAM || '';
-const SENDPULSE_WEBHOOK_KEY = process.env.SENDPULSE_WEBHOOK_KEY || '';
-const SENDPULSE_API_BASE = process.env.SENDPULSE_API_BASE || 'https://api.sendpulse.com';
 
 // ---- Outbound via Chatbot (custom relay) ----
 const CHATBOT_OUTBOUND_URL = process.env.CHATBOT_OUTBOUND_URL || '';
@@ -62,318 +55,18 @@ const CHATBOT_OUTBOUND_INSTAGRAM_URL = process.env.CHATBOT_OUTBOUND_INSTAGRAM_UR
 const CHATBOT_OUTBOUND_KEY = process.env.CHATBOT_OUTBOUND_KEY || '';
 const CHATBOT_OUTBOUND_STRICT = (process.env.CHATBOT_OUTBOUND_STRICT || 'false') === 'true';
 
+// ---- SendPulse Configuration ----
+const SENDPULSE_API_USER_ID = process.env.SENDPULSE_API_USER_ID || '';
+const SENDPULSE_API_SECRET = process.env.SENDPULSE_API_SECRET || '';
+const SENDPULSE_WEBHOOK_SECRET = process.env.SENDPULSE_WEBHOOK_SECRET || '';
+
 // ---- Internal notifications ----
 const INTERNAL_NOTIFY_SLACK_WEBHOOK = process.env.INTERNAL_NOTIFY_SLACK_WEBHOOK || '';
 const INTERNAL_NOTIFY_DISCORD_WEBHOOK = process.env.INTERNAL_NOTIFY_DISCORD_WEBHOOK || '';
 const INTERNAL_NOTIFY_EMAIL_TO = process.env.INTERNAL_NOTIFY_EMAIL_TO || '';
 const INTERNAL_NOTIFY_ENABLED = (process.env.INTERNAL_NOTIFY_ENABLED || 'true') === 'true';
 
-let sendpulseToken = { access_token: '', expires_at: 0, base: '' };
 
-// In-memory cache: IG chat_id -> { contact_id, base, expires_at }
-const igContactCache = new Map();
-function setIgContactCache(chatId, value) {
-  try {
-    igContactCache.set(String(chatId), value);
-  } catch {}
-}
-function getIgContactCache(chatId) {
-  try {
-    const v = igContactCache.get(String(chatId));
-    if (!v) return null;
-    if (v.expires_at && v.expires_at < Date.now()) { igContactCache.delete(String(chatId)); return null; }
-    return v;
-  } catch { return null; }
-}
-async function getSendpulseToken(forceNew = false, preferredBase = null) {
-  const now = Math.floor(Date.now() / 1000);
-  const sanitize = (b) => (b || '').trim().replace(/\/+$/, '');
-  const envBase = sanitize(process.env.SENDPULSE_API_BASE || 'https://api.sendpulse.com');
-  const candidatesRaw = [preferredBase ? sanitize(preferredBase) : null, envBase, 'https://api.eu.sendpulse.com', 'https://api.sendpulse.com'];
-  const candidates = Array.from(new Set(candidatesRaw.filter(Boolean)));
-
-  // Reuse cached token if still valid and matches the preferred base (if any)
-  const preferred = preferredBase ? sanitize(preferredBase) : null;
-  if (
-    !forceNew &&
-    sendpulseToken.access_token &&
-    sendpulseToken.expires_at - 60 > now &&
-    (!preferred || sendpulseToken.base === preferred)
-  ) {
-    return sendpulseToken.access_token;
-  }
-
-  if (!SENDPULSE_CLIENT_ID || !SENDPULSE_CLIENT_SECRET) throw new Error('Missing SendPulse client id/secret');
-
-  const formBody = new URLSearchParams();
-  formBody.set('grant_type', 'client_credentials');
-  formBody.set('client_id', SENDPULSE_CLIENT_ID);
-  formBody.set('client_secret', SENDPULSE_CLIENT_SECRET);
-
-  let lastErr = null;
-  for (const base of candidates) {
-    try {
-      const url = `${base}/oauth/access_token`;
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: formBody.toString()
-      });
-      const j = await r.json().catch(() => ({}));
-      if (r.ok && j.access_token) {
-        sendpulseToken = { access_token: j.access_token, expires_at: now + (j.expires_in || 3600), base };
-        return sendpulseToken.access_token;
-      }
-      console.error('SendPulse token failed', r.status, base, JSON.stringify(j).slice(0, 200));
-    } catch (e) {
-      lastErr = e;
-      console.error('SendPulse token fetch error', base, e.message);
-    }
-  }
-  if (lastErr) throw lastErr;
-  throw new Error('SendPulse token error');
-}
-// Resolve correct contact_id for an Instagram chat_id using SendPulse APIs, with caching and regional fallbacks
-async function resolveIgContactId(chatId) {
-  const key = String(chatId);
-  const cached = getIgContactCache(key);
-  if (cached?.contact_id) return cached;
-
-  const sanitize = (b) => (b || '').trim().replace(/\/+$/, '');
-  const envBase = sanitize(process.env.SENDPULSE_API_BASE || 'https://api.sendpulse.com');
-  const bases = Array.from(new Set([envBase, sendpulseToken.base || null, 'https://api.eu.sendpulse.com', 'https://api.sendpulse.com'].filter(Boolean)));
-
-  const tryPaths = [
-    // Preferred IG chat details -> should include contact info
-    (base) => ({ url: `${base}/instagram/chats/${encodeURIComponent(key)}`, parse: (j) => j?.contact?.id || j?.contact_id || j?.subscriber?.id }),
-    // IG messages endpoint sometimes returns chat metadata in wrapper
-    (base) => ({ url: `${base}/instagram/chats/messages?chat_id=${encodeURIComponent(key)}&limit=1`, parse: (j) => j?.chat?.contact_id || j?.contact?.id || j?.subscriber?.id }),
-    // Fallback to generic chatbots contact lookup
-    (base) => ({ url: `${base}/chatbots/contacts/${encodeURIComponent(key)}`, parse: (j) => j?.id || j?.contact_id }),
-  ];
-
-  for (const base of bases) {
-    for (const build of tryPaths) {
-      try {
-        const { url, parse } = build(base);
-        const t1 = await getSendpulseToken(false, base);
-        let r = await fetch(url, { headers: { Authorization: `Bearer ${t1}` } });
-        if (r.status === 401 || r.status === 403) {
-          const t2 = await getSendpulseToken(true, base);
-          r = await fetch(url, { headers: { Authorization: `Bearer ${t2}` } });
-        }
-        const text = await r.text().catch(() => '');
-        let j = null; try { j = text ? JSON.parse(text) : null; } catch {}
-        if (r.ok) {
-          const contactId = parse && j ? parse(j) : null;
-          if (contactId) {
-            const record = { contact_id: String(contactId), base, expires_at: Date.now() + 15 * 60 * 1000 };
-            setIgContactCache(key, record);
-            return record;
-          }
-        } else {
-          // non-ok: keep trying
-        }
-      } catch (e) {
-        // try next
-      }
-    }
-  }
-  return null;
-}
-
-// SendPulse Instagram sender: Enhanced version with platform-specific handling
-async function sendPulseSendInstagram(chatId, text) {
-  try {
-    if (!chatId || !text) return false;
-
-    const base = 'https://api.sendpulse.com';
-    const botId = process.env.SENDPULSE_BOT_ID_INSTAGRAM;
-    
-    // Enhanced payload with bot_id for better platform compatibility
-    const payload = {
-      chat_id: String(chatId),
-      contact_id: String(chatId),
-      bot_id: String(botId), // Include bot_id for better delivery
-      text: String(text)
-    };
-
-    const debugSend = (process.env.DEBUG_SP_SEND || 'true') === 'true';
-    if (debugSend) console.log('SP IG send attempt:', { 
-      chat_id: payload.chat_id, 
-      bot_id: payload.bot_id,
-      text: payload.text.substring(0, 100) 
-    });
-
-    try {
-      const token = await getSendpulseToken(false, base);
-      const url = `${base}/instagram/chats/messages`;
-
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 
-          Authorization: `Bearer ${token}`, 
-          'Content-Type': 'application/json',
-          'User-Agent': 'SendPulse-Instagram-Bot/1.0' // Add user agent for better compatibility
-        },
-        body: JSON.stringify(payload),
-      });
-
-      const textBody = await resp.text().catch(() => '');
-      let json;
-      try { json = textBody ? JSON.parse(textBody) : null; } catch {}
-
-      if (!resp.ok) {
-        console.error('SendPulse IG send failed', resp.status, url, JSON.stringify(payload), textBody.slice(0, 1000));
-        return false;
-      }
-
-      if (json && typeof json.success === 'boolean' && json.success === false) {
-        console.error('SendPulse IG send API error (success=false)', url, JSON.stringify(payload), textBody.slice(0, 1000));
-        return false;
-      }
-
-      // Enhanced success logging with message ID
-      const messageId = json?.data?.[0]?.id;
-      if (debugSend) {
-        console.log('SP IG send OK', url, { 
-          chat_id: payload.chat_id, 
-          bot_id: payload.bot_id,
-          message_id: messageId,
-          success: true 
-        });
-      }
-
-      // Log warning about potential delivery issues
-      if (messageId) {
-        console.warn('⚠️  Instagram message sent to SendPulse successfully, but delivery to Instagram may be blocked by platform policies');
-        console.warn('💡 Check Instagram app and verify business account permissions');
-      }
-
-      return true;
-
-    } catch (e) {
-      console.error('SendPulse IG send error', e.message);
-      return false;
-    }
-  } catch (e) {
-    console.error('SendPulse IG send error', e.message);
-    
-    // Try fallback method if primary fails
-    console.log('🔄 Trying fallback Instagram messaging method...');
-    return await sendPulseSendInstagramFallback(chatId, text);
-  }
-}
-
-// Fallback Instagram messaging method using Chatbots API
-async function sendPulseSendInstagramFallback(chatId, text) {
-  try {
-    if (!chatId || !text) return false;
-
-    const base = 'https://api.sendpulse.com';
-    const botId = process.env.SENDPULSE_BOT_ID_INSTAGRAM;
-    
-    // Try Chatbots API as fallback
-    const payload = {
-      bot_id: String(botId),
-      contact_id: String(chatId),
-      text: String(text)
-    };
-
-    const debugSend = (process.env.DEBUG_SP_SEND || 'true') === 'true';
-    if (debugSend) console.log('SP IG fallback attempt:', { 
-      bot_id: payload.bot_id,
-      contact_id: payload.contact_id,
-      text: payload.text.substring(0, 100) 
-    });
-
-    try {
-      const token = await getSendpulseToken(false, base);
-      const url = `${base}/chatbots/messages/send`;
-
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 
-          Authorization: `Bearer ${token}`, 
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload),
-      });
-
-      const textBody = await resp.text().catch(() => '');
-      let json;
-      try { json = textBody ? JSON.parse(textBody) : null; } catch {}
-
-      if (!resp.ok) {
-        console.error('SendPulse IG fallback failed', resp.status, url, JSON.stringify(payload), textBody.slice(0, 1000));
-        return false;
-      }
-
-      if (json && typeof json.success === 'boolean' && json.success === false) {
-        console.error('SendPulse IG fallback API error (success=false)', url, JSON.stringify(payload), textBody.slice(0, 1000));
-        return false;
-      }
-
-      if (debugSend) {
-        console.log('SP IG fallback OK', url, { 
-          bot_id: payload.bot_id,
-          contact_id: payload.contact_id,
-          success: true 
-        });
-      }
-
-      return true;
-
-    } catch (e) {
-      console.error('SendPulse IG fallback error', e.message);
-      return false;
-    }
-  } catch (e) {
-    console.error('SendPulse IG fallback error', e.message);
-    return false;
-  }
-}
-// SendPulse Chatbots sender (used for Facebook): POST {BASE}/chatbots/messages/send with message object
-async function sendPulseSendChatbots(botId, chatId, text) {
-  try {
-    if (!botId || !chatId || !text) return false;
-    const payload = {
-      bot_id: botId,
-      chat_id: String(chatId),
-      contact_id: String(chatId),
-      message: { type: 'text', text: String(text) }
-    };
-
-    const sanitize = (b) => (b || '').trim().replace(/\/+$/, '');
-    const base = sanitize(process.env.SENDPULSE_API_BASE || 'https://api.sendpulse.com');
-
-    const sendOnce = async (forceNewToken = false) => {
-      const token = await getSendpulseToken(forceNewToken);
-      const url = `${base}/chatbots/messages/send`;
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      return { resp, url };
-    };
-
-    let { resp, url } = await sendOnce(false);
-    if (resp.status === 401 || resp.status === 403) {
-      ({ resp, url } = await sendOnce(true));
-    }
-
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => '');
-      console.error('SendPulse Chatbots send failed', resp.status, url, JSON.stringify(payload), body.slice(0, 1000));
-      return false;
-    }
-    return true;
-  } catch (e) {
-    console.error('SendPulse Chatbots send error', e.message);
-    return false;
-  }
-}
 
 // Send outbound messages via custom chatbot relay (optional)
 async function sendViaChatbot({ platform, chatId, contactId, text, conversationId }) {
@@ -433,10 +126,131 @@ async function isRecentDuplicate(conversationId, sender, content) {
   }
 }
 
+// SendPulse API helper to get access token
+async function getSendPulseToken() {
+  const clientId = process.env.SENDPULSE_CLIENT_ID || process.env.SENDPULSE_API_USER_ID;
+  const clientSecret = process.env.SENDPULSE_CLIENT_SECRET || process.env.SENDPULSE_API_SECRET;
+  if (!clientId || !clientSecret) return null;
+  try {
+    const url = 'https://api.sendpulse.com/oauth/access_token';
+    const form = new URLSearchParams();
+    form.set('grant_type', 'client_credentials');
+    form.set('client_id', clientId);
+    form.set('client_secret', clientSecret);
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString()
+    });
+    const json = await r.json();
+    return r.ok ? json.access_token : null;
+  } catch (e) {
+    console.error('SendPulse token error', e.message);
+    return null;
+  }
+}
+
+// Send message via SendPulse Instagram API using chatbot trigger
+async function sendPulseMessage(contactId, text) {
+  try {
+    if (!contactId || !text) return false;
+    const token = await getSendPulseToken();
+    if (!token) return false;
+
+    // Try chatbot trigger first - this may work better for Instagram business accounts
+    const chatbotUrl = 'https://api.sendpulse.com/messengers/flow/run';
+    const chatbotPayload = {
+      contact_id: String(contactId),
+      bot_id: "68ab38663bef0841770e2282",
+      trigger: "agent_message", // Try the original trigger name first
+      variables: {
+        agent_message: String(text),
+        message: String(text),
+        text: String(text), // Try multiple variable names
+        content: String(text)
+      }
+    };
+
+    console.log('   - Trying SendPulse Chatbot API (agent_message):', JSON.stringify(chatbotPayload, null, 2));
+    
+    const chatbotResponse = await fetch(chatbotUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(chatbotPayload)
+    });
+    
+    if (chatbotResponse.ok) {
+      console.log('   ✅ SendPulse Chatbot (agent_message) successful');
+      return true;
+    } else {
+      const chatbotError = await chatbotResponse.text().catch(() => '');
+      console.log('   ❌ Chatbot (agent_message) failed:', chatbotResponse.status, chatbotError);
+      
+      // Try alternative trigger names that might exist
+      const alternativeTriggers = ['start', 'welcome', 'default', 'Standard reply', 'api_message'];
+      
+      for (const triggerName of alternativeTriggers) {
+        console.log(`   - Trying alternative trigger: "${triggerName}"`);
+        const altPayload = { ...chatbotPayload, trigger: triggerName };
+        
+        const altResponse = await fetch(chatbotUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify(altPayload)
+        });
+        
+        if (altResponse.ok) {
+          console.log(`   ✅ SendPulse Chatbot (${triggerName}) successful!`);
+          return true;
+        } else {
+          const altError = await altResponse.text().catch(() => '');
+          console.log(`   ❌ Trigger "${triggerName}" failed:`, altResponse.status);
+        }
+      }
+    }
+
+    // Last resort: direct message API
+    console.log('   - Falling back to direct message API');
+    const directUrl = 'https://api.sendpulse.com/instagram/chats/messages';
+    const directPayload = {
+      chat_id: String(contactId),
+      contact_id: String(contactId),
+      text: String(text)
+    };
+
+    const directResponse = await fetch(directUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(directPayload)
+    });
+    
+    if (!directResponse.ok) {
+      const t = await directResponse.text().catch(() => '');
+      console.warn('   ❌ SendPulse direct send failed', directResponse.status, t);
+      return false;
+    }
+    
+    console.log('   ✅ SendPulse direct message sent (may be blocked by Instagram)');
+    return true;
+  } catch (e) {
+    console.error('SendPulse send error', e.message);
+    return false;
+  }
+}
+
 async function metaSendMessage(platform, recipientId, text) {
-  return false; // Meta sending disabled
   try {
     if (!recipientId || !text) return false;
+    // Prefer IG token for instagram; fallback to FB page token if IG not present
     const token = platform === 'instagram'
       ? (IG_PAGE_ACCESS_TOKEN || FB_PAGE_ACCESS_TOKEN)
       : FB_PAGE_ACCESS_TOKEN;
@@ -447,8 +261,6 @@ async function metaSendMessage(platform, recipientId, text) {
       recipient: { id: String(recipientId) },
       message: { text: String(text) },
       messaging_type: 'RESPONSE',
-      // If platform is Instagram, most setups accept the same Send API payload.
-      // Some deployments include: messaging_product: 'instagram'
       ...(platform === 'instagram' ? { messaging_product: 'instagram' } : {})
     };
 
@@ -823,6 +635,315 @@ app.get('/webhooks/meta', (req, res) => {
   }
 });
 
+// SendPulse webhook for Instagram messages
+app.post('/webhooks/sendpulse/instagram', express.json(), async (req, res) => {
+  try {
+    console.log('=== SendPulse Instagram Webhook Received ===');
+    console.log('Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('Raw Body:', JSON.stringify(req.body, null, 2));
+    
+    // SendPulse webhook verification (optional)
+    const authKey = req.headers['x-sendpulse-key'] || req.headers['authorization'] || '';
+    console.log('Auth Key:', authKey);
+    
+    const payload = req.body || {};
+    console.log('SendPulse Instagram webhook payload:', JSON.stringify(payload, null, 2));
+    
+    // SendPulse Instagram webhook format - handle both array and object formats
+    let contactId = '';
+    let chatId = '';
+    let senderName = 'Instagram User';
+    let messageText = '';
+    let messageId = '';
+    
+    // Check if payload is an array (as seen in real webhook calls)
+    if (Array.isArray(payload) && payload.length > 0) {
+      const firstItem = payload[0];
+      
+      // Extract message data from the nested structure
+      contactId = firstItem.contact?.id || '';
+      // Use the contact username as the chat ID for Instagram, fallback to contact ID
+      chatId = firstItem.contact?.username || firstItem.contact?.id || '';
+      senderName = firstItem.contact?.name || 'Instagram User';
+      messageText = firstItem.info?.message?.channel_data?.message?.text || '';
+      messageId = firstItem.info?.message?.channel_data?.message?.mid || firstItem.info?.message?.message_id || '';
+      
+      console.log('SendPulse parsed data:', {
+        contactId,
+        chatId, 
+        senderName,
+        messageText,
+        originalContact: JSON.stringify(firstItem.contact)
+      });
+    } else {
+      // Handle simple object format (for test messages)
+      contactId = payload.contact?.id || payload.contact_id || '';
+      chatId = payload.contact?.variables?.instagram_id || payload.instagram_id || contactId;
+      senderName = payload.contact?.name || payload.contact?.variables?.first_name || 'Instagram User';
+      messageText = payload.message?.text || payload.text || payload.message || '';
+      messageId = payload.message?.id || payload.message_id || '';
+    }
+    
+    if (!chatId || !messageText) {
+      console.warn('SendPulse webhook missing required fields:', { chatId, messageText });
+      return res.status(200).send('OK'); // Always return 200 for webhook
+    }
+    
+    const platform = 'instagram';
+    const channel = await getOrCreateChannel(platform, platform);
+    
+    // Find or create conversation for this Instagram user
+    let convRes = await pool.query(
+      `SELECT * FROM conversations WHERE channel_id = $1 AND customer_external_id = $2 AND status = 'open' ORDER BY created_at DESC LIMIT 1`,
+      [channel.id, chatId]
+    );
+    let conversation;
+    let picked = null;
+    
+    if (!convRes.rowCount) {
+      const pickRes = await pool.query(
+        `SELECT a.id, a.name, a.socket_id,
+                (SELECT COUNT(1) FROM conversations c WHERE c.assigned_agent_id = a.id AND c.status = 'open') AS open_conversations
+         FROM agents a
+         WHERE a.online = TRUE AND a.socket_id IS NOT NULL
+         ORDER BY open_conversations ASC, a.id ASC
+         LIMIT 1`
+      );
+      picked = pickRes.rows[0] || null;
+      
+      convRes = await pool.query(
+        `INSERT INTO conversations (customer_name, status, assigned_agent_id, channel_id, customer_external_id, customer_contact_id)
+         VALUES ($1, 'open', $2, $3, $4, $5)
+         RETURNING *`,
+        [senderName, picked ? picked.id : null, channel.id, chatId, contactId]
+      );
+      conversation = convRes.rows[0];
+      
+      if (picked?.socket_id) {
+        io.to(picked.socket_id).emit('conversation:assigned', conversation);
+      }
+    } else {
+      conversation = convRes.rows[0];
+    }
+    
+    // Check for duplicates and save message
+    if (!(await isRecentDuplicate(conversation.id, 'customer', messageText))) {
+      const insertSQL = `
+        INSERT INTO messages (username, content, conversation_id, sender)
+        VALUES ($1, $2, $3, 'customer')
+        RETURNING id, username, content, created_at, sender, conversation_id`;
+      const saved = await pool.query(insertSQL, [senderName, messageText, conversation.id]).then(r => r.rows[0]);
+      
+      await pool.query(
+        `UPDATE conversations SET last_activity_at = NOW(), last_sender = 'customer' WHERE id = $1`,
+        [conversation.id]
+      );
+      
+      const room = `conv:${conversation.id}`;
+      io.to(room).emit('conversation:message', saved);
+      io.emit('inbox:update', { conversationId: conversation.id, last_sender: 'customer' });
+      
+      // Internal notifications
+      notifyInternalNewMessage({
+        platform,
+        chatId,
+        name: senderName,
+        text: messageText,
+        conversationId: conversation.id,
+        baseUrl: baseUrlFromReq(req)
+      }).catch((e) => console.error('notify error', e));
+    }
+    
+    return res.status(200).send('OK');
+  } catch (e) {
+    console.error('SendPulse Instagram webhook error', e);
+    return res.status(200).send('ERROR'); // Always return 200 for webhooks
+  }
+});
+
+// Instagram-specific webhook verification (Meta direct - keeping as backup)
+app.get('/webhooks/instagram', (req, res) => {
+  try {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+    if (mode === 'subscribe' && token && token === META_VERIFY_TOKEN) {
+      return res.status(200).send(challenge);
+    }
+    return res.sendStatus(403);
+  } catch (e) {
+    return res.sendStatus(500);
+  }
+});
+
+// Instagram-specific webhook handler
+app.post('/webhooks/instagram', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    // Verify signature (optional strict mode)
+    const signature =
+      req.get('X-Hub-Signature-256') ||
+      req.get('X-Hub-Signature') ||
+      req.headers['x-hub-signature-256'] ||
+      req.headers['x-hub-signature'] ||
+      '';
+    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+    const sigOk = verifyMetaSignature(signature, raw);
+    if (META_WEBHOOK_STRICT && !sigOk) {
+      return res.sendStatus(401);
+    }
+
+    // Parse payload for logging/diagnostics
+    let payload = null;
+    try { payload = JSON.parse(raw.toString('utf8') || '{}'); } catch {}
+    try { console.log('Instagram webhook event:', JSON.stringify(payload).slice(0, 1500)); } catch {}
+
+    // Process Instagram messaging events (force platform to instagram)
+    try {
+      const entries = Array.isArray(payload?.entry) ? payload.entry : [];
+      for (const entry of entries) {
+        // Handle both "messaging" and "changes" array shapes
+        const messaging = Array.isArray(entry.messaging) ? entry.messaging : [];
+        const changes = Array.isArray(entry.changes) ? entry.changes : [];
+        
+        // Process messaging events
+        for (const m of messaging) {
+          try {
+            const platform = 'instagram'; // Force Instagram platform
+            if (m.message?.is_echo) continue; // ignore echoes
+            const senderId = (m.sender?.id || m.from?.id || '').toString();
+            let text = (m.message?.text || m.message?.caption || '').toString().trim();
+            if (!text) text = '[non-text message]';
+            if (!senderId) continue;
+
+            const channel = await getOrCreateChannel(platform, platform);
+
+            // Find or create conversation for this chat/user id
+            let convRes = await pool.query(
+              `SELECT * FROM conversations WHERE channel_id = $1 AND customer_external_id = $2 AND status = 'open' ORDER BY created_at DESC LIMIT 1`,
+              [channel.id, senderId]
+            );
+            let conversation;
+            let picked = null;
+            if (!convRes.rowCount) {
+              const pickRes = await pool.query(
+                `SELECT a.id, a.name, a.socket_id,
+                        (SELECT COUNT(1) FROM conversations c WHERE c.assigned_agent_id = a.id AND c.status = 'open') AS open_conversations
+                 FROM agents a
+                 WHERE a.online = TRUE AND a.socket_id IS NOT NULL
+                 ORDER BY open_conversations ASC, a.id ASC
+                 LIMIT 1`
+              );
+              picked = pickRes.rows[0] || null;
+              convRes = await pool.query(
+                `INSERT INTO conversations (customer_name, status, assigned_agent_id, channel_id, customer_external_id)
+                 VALUES ($1, 'open', $2, $3, $4)
+                 RETURNING *`,
+                ['Instagram User', picked ? picked.id : null, channel.id, senderId]
+              );
+              conversation = convRes.rows[0];
+              if (picked?.socket_id) io.to(picked.socket_id).emit('conversation:assigned', conversation);
+            } else {
+              conversation = convRes.rows[0];
+            }
+
+            if (!(await isRecentDuplicate(conversation.id, 'customer', text))) {
+              const insertSQL = `
+                INSERT INTO messages (username, content, conversation_id, sender)
+                VALUES ($1, $2, $3, 'customer')
+                RETURNING id, username, content, created_at, sender, conversation_id`;
+              const saved = await pool.query(insertSQL, ['Instagram User', text, conversation.id]).then(r => r.rows[0]);
+
+              await pool.query(
+                `UPDATE conversations SET last_activity_at = NOW(), last_sender = 'customer' WHERE id = $1`,
+                [conversation.id]
+              );
+
+              const room = `conv:${conversation.id}`;
+              io.to(room).emit('conversation:message', saved);
+              io.emit('inbox:update', { conversationId: conversation.id, last_sender: 'customer' });
+              notifyInternalNewMessage({ platform, chatId: senderId, name: 'Instagram User', text, conversationId: conversation.id, baseUrl: baseUrlFromReq(req) })
+                .catch((e) => console.error('notify error', e));
+            }
+          } catch (e) {
+            console.error('Instagram webhook messaging event process error', e);
+          }
+        }
+        
+        // Process changes events (Instagram-specific)
+        for (const ch of changes) {
+          try {
+            const v = ch.value || {};
+            const senderId = (v.from?.id || v.sender_id || '').toString();
+            let text = (v.message?.text || v.text || v.message?.caption || '').toString().trim();
+            if (!text) text = '[non-text message]';
+            if (!senderId) continue;
+
+            const platform = 'instagram';
+            const channel = await getOrCreateChannel(platform, platform);
+
+            let convRes = await pool.query(
+              `SELECT * FROM conversations WHERE channel_id = $1 AND customer_external_id = $2 AND status = 'open' ORDER BY created_at DESC LIMIT 1`,
+              [channel.id, senderId]
+            );
+            let conversation;
+            let picked = null;
+            if (!convRes.rowCount) {
+              const pickRes = await pool.query(
+                `SELECT a.id, a.name, a.socket_id,
+                        (SELECT COUNT(1) FROM conversations c WHERE c.assigned_agent_id = a.id AND c.status = 'open') AS open_conversations
+                 FROM agents a
+                 WHERE a.online = TRUE AND a.socket_id IS NOT NULL
+                 ORDER BY open_conversations ASC, a.id ASC
+                 LIMIT 1`
+              );
+              picked = pickRes.rows[0] || null;
+              convRes = await pool.query(
+                `INSERT INTO conversations (customer_name, status, assigned_agent_id, channel_id, customer_external_id)
+                 VALUES ($1, 'open', $2, $3, $4)
+                 RETURNING *`,
+                ['Instagram User', picked ? picked.id : null, channel.id, senderId]
+              );
+              conversation = convRes.rows[0];
+              if (picked?.socket_id) io.to(picked.socket_id).emit('conversation:assigned', conversation);
+            } else {
+              conversation = convRes.rows[0];
+            }
+
+            if (!(await isRecentDuplicate(conversation.id, 'customer', text))) {
+              const insertSQL = `
+                INSERT INTO messages (username, content, conversation_id, sender)
+                VALUES ($1, $2, $3, 'customer')
+                RETURNING id, username, content, created_at, sender, conversation_id`;
+              const saved = await pool.query(insertSQL, ['Instagram User', text, conversation.id]).then(r => r.rows[0]);
+
+              await pool.query(
+                `UPDATE conversations SET last_activity_at = NOW(), last_sender = 'customer' WHERE id = $1`,
+                [conversation.id]
+              );
+
+              const room = `conv:${conversation.id}`;
+              io.to(room).emit('conversation:message', saved);
+              io.emit('inbox:update', { conversationId: conversation.id, last_sender: 'customer' });
+              notifyInternalNewMessage({ platform, chatId: senderId, name: 'Instagram User', text, conversationId: conversation.id, baseUrl: baseUrlFromReq(req) })
+                .catch((e) => console.error('notify error', e));
+            }
+          } catch (e) {
+            console.error('Instagram webhook changes event process error', e);
+          }
+        }
+      }
+    } catch (procErr) {
+      console.error('Instagram webhook processing error', procErr);
+    }
+
+    // Respond per Meta requirements
+    return res.status(200).send('EVENT_RECEIVED');
+  } catch (e) {
+    console.error('Instagram webhook error', e);
+    return res.sendStatus(200);
+  }
+});
+
 app.post('/webhooks/meta', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     // Verify signature (optional strict mode)
@@ -843,7 +964,147 @@ app.post('/webhooks/meta', express.raw({ type: 'application/json' }), async (req
     try { payload = JSON.parse(raw.toString('utf8') || '{}'); } catch {}
     try { console.log('Meta webhook event:', JSON.stringify(payload).slice(0, 1500)); } catch {}
 
-    // Respond quickly per Meta requirements
+    // Process Instagram/Messenger messaging events
+    try {
+      const entries = Array.isArray(payload?.entry) ? payload.entry : [];
+      for (const entry of entries) {
+        // 1) Handle classic "messaging" array shape
+        const messaging = Array.isArray(entry.messaging) ? entry.messaging : [];
+        for (const m of messaging) {
+          try {
+            const product = (m.messaging_product || payload.object || '').toString().toLowerCase();
+            const platform = (product === 'instagram' || payload.object === 'instagram') ? 'instagram' : 'facebook';
+            if (m.message?.is_echo) continue; // ignore echoes
+            const senderId = (m.sender?.id || m.from?.id || '').toString();
+            let text = (m.message?.text || m.message?.caption || '').toString().trim();
+            if (!text) text = '[non-text message]';
+            if (!senderId) continue;
+
+            const channel = await getOrCreateChannel(platform, platform);
+
+            // Find or create conversation for this chat/user id
+            let convRes = await pool.query(
+              `SELECT * FROM conversations WHERE channel_id = $1 AND customer_external_id = $2 AND status = 'open' ORDER BY created_at DESC LIMIT 1`,
+              [channel.id, senderId]
+            );
+            let conversation;
+            let picked = null;
+            if (!convRes.rowCount) {
+              const pickRes = await pool.query(
+                `SELECT a.id, a.name, a.socket_id,
+                        (SELECT COUNT(1) FROM conversations c WHERE c.assigned_agent_id = a.id AND c.status = 'open') AS open_conversations
+                 FROM agents a
+                 WHERE a.online = TRUE AND a.socket_id IS NOT NULL
+                 ORDER BY open_conversations ASC, a.id ASC
+                 LIMIT 1`
+              );
+              picked = pickRes.rows[0] || null;
+              convRes = await pool.query(
+                `INSERT INTO conversations (customer_name, status, assigned_agent_id, channel_id, customer_external_id)
+                 VALUES ($1, 'open', $2, $3, $4)
+                 RETURNING *`,
+                [platform === 'instagram' ? 'Instagram User' : 'Facebook User', picked ? picked.id : null, channel.id, senderId]
+              );
+              conversation = convRes.rows[0];
+              if (picked?.socket_id) io.to(picked.socket_id).emit('conversation:assigned', conversation);
+            } else {
+              conversation = convRes.rows[0];
+            }
+
+            if (!(await isRecentDuplicate(conversation.id, 'customer', text))) {
+              const insertSQL = `
+                INSERT INTO messages (username, content, conversation_id, sender)
+                VALUES ($1, $2, $3, 'customer')
+                RETURNING id, username, content, created_at, sender, conversation_id`;
+              const saved = await pool.query(insertSQL, [platform === 'instagram' ? 'Instagram User' : 'Facebook User', text, conversation.id]).then(r => r.rows[0]);
+
+              await pool.query(
+                `UPDATE conversations SET last_activity_at = NOW(), last_sender = 'customer' WHERE id = $1`,
+                [conversation.id]
+              );
+
+              const room = `conv:${conversation.id}`;
+              io.to(room).emit('conversation:message', saved);
+              io.emit('inbox:update', { conversationId: conversation.id, last_sender: 'customer' });
+              notifyInternalNewMessage({ platform, chatId: senderId, name: platform === 'instagram' ? 'Instagram User' : 'Facebook User', text, conversationId: conversation.id, baseUrl: baseUrlFromReq(req) })
+                .catch((e) => console.error('notify error', e));
+            }
+          } catch (e) {
+            console.error('Meta webhook messaging event process error', e);
+          }
+        }
+
+        // 2) Handle "changes" shape sometimes seen with Instagram webhooks
+        const changes = Array.isArray(entry.changes) ? entry.changes : [];
+        for (const ch of changes) {
+          try {
+            const v = ch.value || {};
+            const product = (v.messaging_product || '').toString().toLowerCase();
+            if (product !== 'instagram') continue;
+            const senderId = (v.from?.id || v.sender_id || '').toString();
+            let text = (v.message?.text || v.text || v.message?.caption || '').toString().trim();
+            if (!text) text = '[non-text message]';
+            if (!senderId) continue;
+
+            const platform = 'instagram';
+            const channel = await getOrCreateChannel(platform, platform);
+
+            let convRes = await pool.query(
+              `SELECT * FROM conversations WHERE channel_id = $1 AND customer_external_id = $2 AND status = 'open' ORDER BY created_at DESC LIMIT 1`,
+              [channel.id, senderId]
+            );
+            let conversation;
+            let picked = null;
+            if (!convRes.rowCount) {
+              const pickRes = await pool.query(
+                `SELECT a.id, a.name, a.socket_id,
+                        (SELECT COUNT(1) FROM conversations c WHERE c.assigned_agent_id = a.id AND c.status = 'open') AS open_conversations
+                 FROM agents a
+                 WHERE a.online = TRUE AND a.socket_id IS NOT NULL
+                 ORDER BY open_conversations ASC, a.id ASC
+                 LIMIT 1`
+              );
+              picked = pickRes.rows[0] || null;
+              convRes = await pool.query(
+                `INSERT INTO conversations (customer_name, status, assigned_agent_id, channel_id, customer_external_id)
+                 VALUES ($1, 'open', $2, $3, $4)
+                 RETURNING *`,
+                ['Instagram User', picked ? picked.id : null, channel.id, senderId]
+              );
+              conversation = convRes.rows[0];
+              if (picked?.socket_id) io.to(picked.socket_id).emit('conversation:assigned', conversation);
+            } else {
+              conversation = convRes.rows[0];
+            }
+
+            if (!(await isRecentDuplicate(conversation.id, 'customer', text))) {
+              const insertSQL = `
+                INSERT INTO messages (username, content, conversation_id, sender)
+                VALUES ($1, $2, $3, 'customer')
+                RETURNING id, username, content, created_at, sender, conversation_id`;
+              const saved = await pool.query(insertSQL, ['Instagram User', text, conversation.id]).then(r => r.rows[0]);
+
+              await pool.query(
+                `UPDATE conversations SET last_activity_at = NOW(), last_sender = 'customer' WHERE id = $1`,
+                [conversation.id]
+              );
+
+              const room = `conv:${conversation.id}`;
+              io.to(room).emit('conversation:message', saved);
+              io.emit('inbox:update', { conversationId: conversation.id, last_sender: 'customer' });
+              notifyInternalNewMessage({ platform, chatId: senderId, name: 'Instagram User', text, conversationId: conversation.id, baseUrl: baseUrlFromReq(req) })
+                .catch((e) => console.error('notify error', e));
+            }
+          } catch (e) {
+            console.error('Meta webhook changes event process error', e);
+          }
+        }
+      }
+    } catch (procErr) {
+      console.error('Meta webhook processing error', procErr);
+    }
+
+    // Respond per Meta requirements
     return res.status(200).send('EVENT_RECEIVED');
   } catch (e) {
     console.error('Meta webhook error', e);
@@ -905,6 +1166,11 @@ app.get('/settings', (req, res) => {
   if (!req.session || !req.session.user) return res.redirect('/login');
   if (req.session.user.role !== 'owner') return res.redirect('/dashboard');
   res.sendFile(path.join(__dirname, 'public', 'settings.html'));
+});
+
+// Manual Instagram responses page
+app.get('/manual-instagram', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'manual_instagram.html'));
 });
 
 // Meta OAuth: start login
@@ -1202,151 +1468,6 @@ app.post('/ingest/outlook', async (req, res) => {
   }
 });
 
-// Debug: fetch latest messages for a SendPulse Instagram contact
-app.get('/debug/sendpulse/ig/messages', async (req, res) => {
-  try {
-    const chatId = (req.query.chat_id || req.query.chatId || '').toString().trim();
-    const limit = Math.min(parseInt(req.query.limit || '20', 10), 100);
-    if (!chatId) return res.status(400).json({ error: 'Missing chat_id' });
-
-    const sanitize = (b) => (b || '').trim().replace(/\/+$/, '');
-    const envBase = sanitize(process.env.SENDPULSE_API_BASE || 'https://api.sendpulse.com');
-    const bases = Array.from(new Set([envBase, sendpulseToken.base || null, 'https://api.eu.sendpulse.com', 'https://api.sendpulse.com'].filter(Boolean)));
-
-    const tryPaths = [
-      (base) => ({ method: 'GET', url: `${base}/instagram/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}` }),
-      (base) => ({ method: 'GET', url: `${base}/instagram/chats/messages?chat_id=${encodeURIComponent(chatId)}&limit=${limit}` }),
-      (base) => ({ method: 'GET', url: `${base}/chatbots/contacts/${encodeURIComponent(chatId)}/messages?limit=${limit}` }),
-    ];
-
-    let lastErr = null;
-    for (const base of bases) {
-      for (const build of tryPaths) {
-        try {
-          const { method, url } = build(base);
-          const token = await getSendpulseToken(false, base);
-          const r = await fetch(url, { method, headers: { Authorization: `Bearer ${token}` } });
-          const text = await r.text().catch(() => '');
-          let json = null; try { json = text ? JSON.parse(text) : null; } catch {}
-          if (r.ok) return res.json({ ok: true, base, url, data: json ?? text });
-          // if unauthorized, refresh token once for this base
-          if (r.status === 401 || r.status === 403) {
-            const t2 = await getSendpulseToken(true, base);
-            const r2 = await fetch(url, { method, headers: { Authorization: `Bearer ${t2}` } });
-            const text2 = await r2.text().catch(() => '');
-            let json2 = null; try { json2 = text2 ? JSON.parse(text2) : null; } catch {}
-            if (r2.ok) return res.json({ ok: true, base, url, data: json2 ?? text2 });
-            lastErr = { base, url, status: r2.status, body: (text2 || '').slice(0, 1200) };
-          } else {
-            lastErr = { base, url, status: r.status, body: (text || '').slice(0, 1200) };
-          }
-        } catch (e) {
-          lastErr = { base, error: e.message };
-        }
-      }
-    }
-    return res.status(502).json({ ok: false, error: 'Failed to fetch from SendPulse', lastErr });
-  } catch (e) {
-    console.error('debug sp ig messages error', e);
-    return res.status(500).json({ error: 'internal error', details: e.message });
-  }
-});
-
-// Debug: direct Instagram send via SendPulse (bypasses chatbot relay). Secured by X-Debug-Key.
-app.post('/debug/ig/send', express.json(), async (req, res) => {
-  try {
-    const key = (req.get('X-Debug-Key') || req.query.key || '').toString();
-    const allowKey = process.env.INTEGRATION_INGEST_KEY || process.env.SENDPULSE_WEBHOOK_KEY || '';
-    if (!allowKey || key !== allowKey) {
-      return res.status(403).json({ error: 'forbidden' });
-    }
-
-    const text = (req.body?.text || '').toString().trim();
-    let chatId = (req.body?.chat_id || req.body?.chatId || '').toString().trim();
-    const convIdRaw = req.body?.conversationId;
-    const conversationId = convIdRaw != null ? Number(convIdRaw) : NaN;
-    let usedConversation = null;
-
-    if ((!chatId || !chatId.length) && !Number.isNaN(conversationId)) {
-      const q = await pool.query(
-        `SELECT conv.id, conv.customer_external_id, conv.customer_contact_id, ch.name AS channel_name
-         FROM conversations conv LEFT JOIN channels ch ON ch.id = conv.channel_id
-         WHERE conv.id = $1`,
-        [conversationId]
-      );
-      if (!q.rowCount) return res.status(404).json({ error: 'conversation not found' });
-      const r = q.rows[0];
-      if (r.channel_name !== 'instagram') return res.status(400).json({ error: 'conversation is not instagram' });
-      chatId = String(r.customer_external_id || '').trim();
-      usedConversation = { id: r.id, contact_id: r.customer_contact_id || null };
-    }
-
-    if (!chatId || !text) return res.status(400).json({ error: 'Missing chat_id or text' });
-
-    const ok = await sendPulseSendInstagram(chatId, text);
-    return res.json({ ok, chat_id: chatId, conversation: usedConversation || null });
-  } catch (e) {
-    console.error('debug ig send error', e);
-    return res.status(500).json({ error: 'internal error', details: e.message });
-  }
-});
-
-// Admin: backfill missing IG contact_id for open conversations
-app.post('/admin/backfill/ig-contacts', async (req, res) => {
-  try {
-    // Authorization: owner session OR header/query key matching INTEGRATION_INGEST_KEY (or SENDPULSE_WEBHOOK_KEY)
-    const key = (req.get('X-Backfill-Key') || req.query.key || '').toString();
-    const allowKey = process.env.INTEGRATION_INGEST_KEY || process.env.SENDPULSE_WEBHOOK_KEY || '';
-    const isOwner = !!(req.session?.user && req.session.user.role === 'owner');
-    if (!isOwner && (!allowKey || key !== allowKey)) {
-      return res.status(403).json({ error: 'forbidden' });
-    }
-
-    const limit = Math.min(parseInt(req.query.limit || '50', 10), 500);
-
-    const ch = await pool.query(`SELECT id FROM channels WHERE name = 'instagram' LIMIT 1`).then(r => r.rows[0] || null);
-    if (!ch) return res.json({ ok: true, scanned: 0, updated: 0, skipped: 0, details: [] });
-
-    const rows = await pool.query(
-      `SELECT id, customer_external_id, customer_contact_id
-       FROM conversations
-       WHERE channel_id = $1 AND status = 'open'
-         AND (customer_contact_id IS NULL OR customer_contact_id = '')
-       ORDER BY last_activity_at DESC
-       LIMIT $2`,
-      [ch.id, limit]
-    ).then(r => r.rows);
-
-    let scanned = 0, updated = 0, skipped = 0;
-    const details = [];
-
-    for (const conv of rows) {
-      scanned++;
-      const chatId = String(conv.customer_external_id || '').trim();
-      if (!chatId) { skipped++; details.push({ id: conv.id, reason: 'missing chatId' }); continue; }
-      try {
-        const rec = await resolveIgContactId(chatId);
-        if (rec?.contact_id) {
-          await pool.query(
-            `UPDATE conversations SET customer_contact_id = $2 WHERE id = $1 AND (customer_contact_id IS NULL OR customer_contact_id = '')`,
-            [conv.id, String(rec.contact_id)]
-          );
-          updated++;
-          details.push({ id: conv.id, chat_id: chatId, contact_id: String(rec.contact_id), base: rec.base });
-        } else {
-          skipped++; details.push({ id: conv.id, chat_id: chatId, reason: 'resolve failed' });
-        }
-      } catch (e) {
-        skipped++; details.push({ id: conv.id, chat_id: chatId, error: e.message });
-      }
-    }
-
-    return res.json({ ok: true, scanned, updated, skipped, details });
-  } catch (e) {
-    console.error('backfill ig contacts error', e);
-    return res.status(500).json({ error: 'internal error', details: e.message });
-  }
-});
 
 app.get('/messages', async (req, res) => {
   try {
@@ -1376,191 +1497,116 @@ app.get('/messages', async (req, res) => {
   }
 });
 
-// SendPulse webhook (FB/IG inbound)
-app.post('/webhooks/sendpulse', express.urlencoded({ extended: true }), express.json(), async (req, res) => {
+// Manual response API endpoint
+app.post('/api/send-manual-response', express.json(), async (req, res) => {
   try {
-    // Debug: log headers and body (truncate body to avoid noise)
-    try {
-      const hDump = Object.fromEntries(Object.entries(req.headers || {}));
-      console.log('SP webhook headers', hDump);
-      console.log('SP webhook body', JSON.stringify(req.body || {}).slice(0, 2000));
-    } catch {}
-
-    // Verify optional webhook key with a strict flag (default: not strict)
-    const strict = (process.env.SENDPULSE_WEBHOOK_STRICT || 'false') === 'true';
-    if (SENDPULSE_WEBHOOK_KEY) {
-      const key = req.get('X-Webhook-Key') || req.get('x-webhook-key') || '';
-      if (strict && key !== SENDPULSE_WEBHOOK_KEY) {
-        console.warn('SP webhook key mismatch (strict).');
-        return res.sendStatus(403);
-      }
-      if (!strict && key !== SENDPULSE_WEBHOOK_KEY) {
-        console.warn('SP webhook key mismatch (non-strict) — proceeding for dev');
-      }
+    const { conversationId, message, sender = 'agent', username = 'Manual Agent' } = req.body;
+    
+    if (!conversationId || !message) {
+      return res.status(400).json({ success: false, error: 'Missing conversationId or message' });
     }
-
-    const b = Array.isArray(req.body) ? (req.body[0] || {}) : (req.body || {});
-    const botId = b.bot_id || b.botId || (b?.bot?.id) || '';
-
-    // Debug toggle (default on for now)
-    const dbgEnabled = (process.env.DEBUG_SP_WEBHOOK || 'true') === 'true';
-
-    // Platform inference: explicit, by bot id, or alternative fields (including nested event/payload)
-    let platform = (
-      b.platform || b.source || b.provider || b.channel || b.service || b?.bot?.platform || b?.bot?.provider || b?.bot?.channel ||
-      b?.event?.platform || b?.event?.source || b?.event?.provider || ''
-    ).toString().toLowerCase();
-
-    const matchedEnv = {
-      fbMatch: !!(botId && SENDPULSE_BOT_ID_FACEBOOK && botId === SENDPULSE_BOT_ID_FACEBOOK),
-      igMatch: !!(botId && SENDPULSE_BOT_ID_INSTAGRAM && botId === SENDPULSE_BOT_ID_INSTAGRAM)
-    };
-    if (dbgEnabled) {
-      console.log('SP debug: bot/platform', {
-        botId,
-        envFB: SENDPULSE_BOT_ID_FACEBOOK,
-        envIG: SENDPULSE_BOT_ID_INSTAGRAM,
-        platformCandidate: platform,
-        fbMatch: matchedEnv.fbMatch,
-        igMatch: matchedEnv.igMatch,
-      });
+    
+    const convId = parseInt(conversationId, 10);
+    if (isNaN(convId)) {
+      return res.status(400).json({ success: false, error: 'Invalid conversationId' });
     }
-
-    if (!platform) {
-      if (matchedEnv.fbMatch) platform = 'facebook';
-      else if (matchedEnv.igMatch) platform = 'instagram';
+    
+    const content = String(message).slice(0, 2000).trim();
+    if (!content) {
+      return res.status(400).json({ success: false, error: 'Empty message content' });
     }
-
-    // Ignore non-incoming events (e.g., outgoing_message, delivered, read) to avoid echo/auto-reply loops
-    try {
-      const title = (b.title || b?.event?.title || '').toString().toLowerCase();
-      if (title && title !== 'incoming_message') {
-        if (dbgEnabled) console.log('SP debug: skipping non-incoming', { title });
-        return res.sendStatus(200);
-      }
-    } catch {}
-
-    // Chat ID extraction across common shapes (including nested event/payload)
-    let chatId = (
-      b.chat_id || b.chatId || b.contact_id || b.contactId ||
-      b?.contact?.id || b?.contact?.contact_id || b?.contact?.chat_id ||
-      b?.subscriber?.id || b?.subscriber?.contact_id || b?.subscriber?.chat_id ||
-      b?.user?.id || b?.user?.chat_id || b?.user?.uid ||
-      b?.data?.chat_id || b?.payload?.chat_id || b?.payload?.contact_id ||
-      b?.event?.chat_id || b?.event?.contact_id || b?.event?.payload?.chat_id || ''
+    
+    // Insert the message into database
+    const insertSQL = `
+      INSERT INTO messages (username, content, conversation_id, sender)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, username, content, created_at, sender, conversation_id`;
+    
+    const { rows } = await pool.query(insertSQL, [username, content, convId, sender]);
+    const saved = rows[0];
+    
+    // Update conversation activity
+    await pool.query(
+      `UPDATE conversations
+       SET last_activity_at = NOW(), last_sender = $2
+       WHERE id = $1`,
+      [convId, sender]
     );
-    chatId = (chatId == null ? '' : String(chatId));
-
-    // Text extraction across common shapes (including attachments/captions)
-    let text = (
-      b.text || b?.message?.text || b?.last_message?.text || b?.contact?.last_message || b?.contact?.last_message_data?.message?.text || b?.info?.message?.channel_data?.message?.text ||
-      (Array.isArray(b.messages) && b.messages[0]?.text) ||
-      b?.payload?.text || b?.data?.text || b?.event?.text || b?.event?.data?.text ||
-      b?.message?.caption || b?.payload?.caption || b?.data?.caption || ''
-    );
-    text = (text == null ? '' : String(text)).trim();
-
-    // Name extraction across common shapes
-    const name = (
-      b?.contact?.name || [b?.contact?.first_name, b?.contact?.last_name].filter(Boolean).join(' ') ||
-      b?.user?.name || b?.sender_name || b?.subscriber?.name || 'User'
-    ).toString();
-
-    if (dbgEnabled) {
-      console.log('SP debug: resolved', {
-        platform,
-        botId,
-        fbMatch: matchedEnv.fbMatch,
-        igMatch: matchedEnv.igMatch,
-        chatIdLen: (chatId || '').length,
-        textLen: (text || '').length,
-        hasText: !!text,
-        name
-      });
-    }
-
-    // If platform and chatId are present but text is missing (media-only, sticker, etc.), use a placeholder
-    if (!text) text = '[non-text message]';
-
-    if (!platform || !chatId) {
-      console.warn('SP webhook missing fields', { platform, chatIdLen: chatId?.length || 0, textLen: text?.length || 0 });
-      if (dbgEnabled) {
-        try { console.log('SP debug: payload keys', Object.keys(b || {})); } catch {}
-      }
-      return res.sendStatus(200);
-    }
-
-    const channel = await getOrCreateChannel(platform, platform);
-
-    // Try to capture contact_id from payload to persist for future sends
-    let contactIdFromPayload = (
-      b?.contact?.id || b?.contact_id || b?.contactId || b?.subscriber?.id || b?.user?.id ||
-      b?.event?.contact_id || b?.payload?.contact_id || b?.data?.contact_id || null
-    );
-    contactIdFromPayload = contactIdFromPayload ? String(contactIdFromPayload) : null;
-
-    // Find or create conversation for this chat/user id
-    let convRes = await pool.query(
-      `SELECT * FROM conversations WHERE channel_id = $1 AND customer_external_id = $2 AND status = 'open' ORDER BY created_at DESC LIMIT 1`,
-      [channel.id, chatId]
-    );
-    let conversation;
-    let picked = null;
-    if (!convRes.rowCount) {
-      const pickRes = await pool.query(
-        `SELECT a.id, a.name, a.socket_id,
-                (SELECT COUNT(1) FROM conversations c WHERE c.assigned_agent_id = a.id AND c.status = 'open') AS open_conversations
-         FROM agents a
-         WHERE a.online = TRUE AND a.socket_id IS NOT NULL
-         ORDER BY open_conversations ASC, a.id ASC
-         LIMIT 1`
-      );
-      picked = pickRes.rows[0] || null;
-      convRes = await pool.query(
-        `INSERT INTO conversations (customer_name, status, assigned_agent_id, channel_id, customer_external_id, customer_contact_id)
-         VALUES ($1, 'open', $2, $3, $4, $5)
-         RETURNING *`,
-        [name || `${platform} User`, picked ? picked.id : null, channel.id, chatId, contactIdFromPayload]
-      );
-      conversation = convRes.rows[0];
-      if (picked && picked.socket_id) {
-        io.to(picked.socket_id).emit('conversation:assigned', conversation);
-      }
-    } else {
-      conversation = convRes.rows[0];
-      // Update contact_id if we learned a new one
-      if (contactIdFromPayload && !conversation.customer_contact_id) {
-        try {
-          await pool.query(`UPDATE conversations SET customer_contact_id = $2 WHERE id = $1`, [conversation.id, contactIdFromPayload]);
-          conversation.customer_contact_id = contactIdFromPayload;
-        } catch {}
+    
+    // Emit to socket rooms (if any agents are connected)
+    const room = `conv:${convId}`;
+    io.to(room).emit('conversation:message', saved);
+    io.emit('inbox:update', { conversationId: convId, last_sender: sender });
+    
+    // Try to send outbound to Instagram (only for agent messages)
+    if (sender === 'agent') {
+      try {
+        const q = await pool.query(
+          `SELECT conv.customer_external_id, conv.customer_contact_id, ch.name AS channel_name
+           FROM conversations conv LEFT JOIN channels ch ON ch.id = conv.channel_id
+           WHERE conv.id = $1`,
+          [convId]
+        );
+        
+        if (q.rowCount) {
+          const { customer_external_id: extId, customer_contact_id: contactId, channel_name } = q.rows[0];
+          
+          let sent = false;
+          let sendMethod = 'none';
+          
+          if (channel_name === 'instagram' && contactId) {
+            console.log('📱 Manual response: Sending to Instagram via SendPulse');
+            console.log('   - Contact ID:', contactId);
+            console.log('   - Message:', content.substring(0, 50) + '...');
+            
+            const spOk = await sendPulseMessage(contactId, content);
+            if (spOk) {
+              sent = true;
+              sendMethod = 'sendpulse';
+              console.log('   ✅ SendPulse Instagram message sent');
+            } else {
+              console.warn('   ❌ SendPulse failed, trying Meta API fallback');
+              
+              // Try Meta API fallback if available
+              const metaOk = await metaSendMessage('instagram', extId, content);
+              if (metaOk) {
+                sent = true;
+                sendMethod = 'meta';
+                console.log('   ✅ Meta API Instagram message sent');
+              }
+            }
+          }
+          
+          return res.json({ 
+            success: true, 
+            messageId: saved.id,
+            outbound: {
+              sent,
+              method: sendMethod,
+              channel: channel_name,
+              contactId,
+              externalId: extId
+            }
+          });
+        }
+      } catch (outboundError) {
+        console.error('Manual response outbound error:', outboundError);
+        // Don't fail the whole request if outbound fails
+        return res.json({ 
+          success: true, 
+          messageId: saved.id,
+          warning: 'Message saved but outbound delivery failed: ' + outboundError.message
+        });
       }
     }
-
-    if (!(await isRecentDuplicate(conversation.id, 'customer', text))) {
-      const insertSQL = `
-        INSERT INTO messages (username, content, conversation_id, sender)
-        VALUES ($1, $2, $3, 'customer')
-        RETURNING id, username, content, created_at, sender, conversation_id`;
-      const saved = await pool.query(insertSQL, [name || `${platform} User`, text, conversation.id]).then(r => r.rows[0]);
-
-      await pool.query(
-        `UPDATE conversations SET last_activity_at = NOW(), last_sender = 'customer' WHERE id = $1`,
-        [conversation.id]
-      );
-
-      const room = `conv:${conversation.id}`;
-      io.to(room).emit('conversation:message', saved);
-      io.emit('inbox:update', { conversationId: conversation.id, last_sender: 'customer' });
-      notifyInternalNewMessage({ platform, chatId, name, text, conversationId: conversation.id, baseUrl: baseUrlFromReq(req) })
-        .catch((e) => console.error('notify error', e));
-    }
-    res.sendStatus(200);
+    
+    res.json({ success: true, messageId: saved.id });
   } catch (err) {
-    console.error('SendPulse webhook error', err);
-    res.status(200).end();
+    console.error('Manual response error:', err);
+    res.status(500).json({ success: false, error: 'Failed to send response: ' + err.message });
   }
 });
+
 
 // Telegram webhook (inbound)
 app.post('/webhooks/telegram', express.json(), async (req, res) => {
@@ -2463,39 +2509,58 @@ await twilioClient.messages.create({
               }
             } else if ((channel_name === 'facebook' || channel_name === 'instagram') && extId) {
               try {
+                console.log('🔧 Instagram/Facebook outbound message triggered');
+                console.log('   - Channel:', channel_name);
+                console.log('   - External ID:', extId);
+                console.log('   - Stored Contact ID:', storedContactId);
+                console.log('   - Content:', content.substring(0, 50) + '...');
+                
                 // Prefer routing via custom chatbot relay if configured
                 let sent = false;
                 const cbRes = await sendViaChatbot({ platform: channel_name, chatId: storedContactId || extId, contactId: storedContactId || null, text: content, conversationId });
                 if (cbRes) {
                   sent = !!cbRes.ok;
+                  console.log('   - Chatbot relay result:', cbRes.ok ? 'SUCCESS' : 'FAILED', cbRes);
                   if (!cbRes.ok) console.warn('Chatbot outbound failed', cbRes);
+                } else {
+                  console.log('   - Chatbot relay: Not configured or returned null');
                 }
+                
                 if (!sent && CHATBOT_OUTBOUND_STRICT) {
-                  // In strict mode, do not fall back to Meta/SendPulse
+                  console.log('   - CHATBOT_OUTBOUND_STRICT mode: Skipping fallbacks');
+                  // In strict mode, do not fall back to Meta
                   sent = true; // treat as handled to avoid fallback
                 }
-                if (!sent) {
-                  const ok = await metaSendMessage(channel_name, extId, content);
-                  sent = ok;
+                
+                if (!sent && channel_name === 'instagram' && storedContactId) {
+                  console.log('   - Trying SendPulse Instagram API with contact_id:', storedContactId);
+                  // Try SendPulse Instagram messaging if we have a contact_id
+                  const spOk = await sendPulseMessage(storedContactId, content);
+                  if (spOk) {
+                    sent = true;
+                    console.log('   ✅ SendPulse Instagram message sent successfully');
+                  } else {
+                    console.warn('   ❌ SendPulse Instagram send failed for contact_id', storedContactId);
+                  }
+                } else if (!sent && channel_name === 'instagram') {
+                  console.log('   - Skipping SendPulse: No stored contact_id available');
                 }
+                
                 if (!sent) {
-                  if (channel_name === 'instagram') {
-                    // Use the Instagram-specific SendPulse API which only requires chat_id + text
-                    // Prefer stored contact id if available; send helper will still resolve/fallback
-                    const igOk = await sendPulseSendInstagram(storedContactId || extId, content);
-                    if (!igOk) console.warn('SendPulse IG send failed for chat_id', extId);
-                  } else if (channel_name === 'facebook') {
-                    const botId = SENDPULSE_BOT_ID_FACEBOOK;
-                    if (!botId) {
-                      console.warn('Missing SendPulse bot id for facebook');
-                    } else {
-                      const fbOk = await sendPulseSendChatbots(botId, extId, content);
-                      if (!fbOk) console.warn('SendPulse FB fallback failed for chat_id', extId);
-                    }
+                  console.log('   - Trying Meta Graph API fallback with extId:', extId);
+                  // Use Meta Graph API for Facebook and Instagram messaging
+                  const ok = await metaSendMessage(channel_name, extId, content);
+                  if (ok) {
+                    sent = true;
+                    console.log('   ✅ Meta Graph API message sent successfully');
+                  } else {
+                    console.warn(`   ❌ Meta ${channel_name} send failed for chat_id`, extId);
                   }
                 }
+                
+                console.log('   - Final result:', sent ? 'MESSAGE SENT' : 'ALL METHODS FAILED');
               } catch (e) {
-                console.error('Meta/SendPulse/Chatbot send error', e);
+                console.error('Meta/Chatbot/SendPulse send error', e);
               }
             }
           }

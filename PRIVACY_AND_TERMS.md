@@ -101,3 +101,6 @@ Users can access these pages through:
 2. **Legal Review**: Have a legal professional review the content for your jurisdiction
 3. **Deploy**: The pages are ready to use once customized
 4. **Monitor**: Track user access and update content as needed
+
+
+
